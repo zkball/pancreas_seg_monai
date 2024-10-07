@@ -201,7 +201,7 @@ The examples show how to execute distributed training and evaluation based on 3 
 - Horovod APIs with `horovodrun`.
 - PyTorch ignite and MONAI workflows.
 
-They can run on several distributed nodes with multiple GPU devices on every node.
+They can run on several distributed nodes with multiple GPU devices on every node.v
 ##### [automatic_mixed_precision](./acceleration/automatic_mixed_precision.ipynb)
 And compares the training speed and memory usage with/without AMP.
 ##### [dataset_type_performance](./acceleration/dataset_type_performance.ipynb)

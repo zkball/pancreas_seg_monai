@@ -55,7 +55,7 @@ def main(tempdir):
             LoadImage(image_only=True, ensure_channel_first=True),
             ScaleIntensity(),
             RandSpatialCrop((96, 96), random_size=False),
-            RandRotate90(prob=0.5, spatial_axes=(0, 1)),
+            # RandRotate90(prob=0.5, spatial_axes=(0, 1)),
         ]
     )
     train_segtrans = Compose(
@@ -63,7 +63,7 @@ def main(tempdir):
             LoadImage(image_only=True, ensure_channel_first=True),
             ScaleIntensity(),
             RandSpatialCrop((96, 96), random_size=False),
-            RandRotate90(prob=0.5, spatial_axes=(0, 1)),
+            # RandRotate90(prob=0.5, spatial_axes=(0, 1)),
         ]
     )
     val_imtrans = Compose([LoadImage(image_only=True, ensure_channel_first=True), ScaleIntensity()])

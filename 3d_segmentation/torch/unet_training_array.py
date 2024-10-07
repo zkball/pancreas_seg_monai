@@ -15,6 +15,7 @@ import sys
 import tempfile
 from glob import glob
 
+import monai.losses
 import nibabel as nib
 import numpy as np
 import torch
@@ -35,39 +36,52 @@ from monai.transforms import (
 )
 from monai.visualize import plot_2d_or_3d_image
 
+from tqdm import tqdm
+import torch.distributed as dist
+import ignite.distributed as idist
+from ignite.metrics import Accuracy
+from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data.distributed import DistributedSampler
 
-def main(tempdir):
+def main(image_dir='/raid/datasets/origin/images_A', mask_dir='/raid/datasets/origin/Mask_A'):
     monai.config.print_config()
     logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
+    # initialize the distributed training process, every GPU runs in a process
+    dist.init_process_group(backend="nccl", init_method="env://")
+
     # create a temporary directory and 40 random image, mask pairs
-    print(f"generating synthetic data to {tempdir} (this may take a while)")
-    for i in range(40):
-        im, seg = create_test_image_3d(128, 128, 128, num_seg_classes=1)
+    # print(f"generating synthetic data to {tempdir} (this may take a while)")
+    # for i in range(40):
+    #     im, seg = create_test_image_3d(128, 128, 128, num_seg_classes=1)
 
-        n = nib.Nifti1Image(im, np.eye(4))
-        nib.save(n, os.path.join(tempdir, f"im{i:d}.nii.gz"))
+    #     import pdb;pdb.set_trace()
 
-        n = nib.Nifti1Image(seg, np.eye(4))
-        nib.save(n, os.path.join(tempdir, f"seg{i:d}.nii.gz"))
+    #     n = nib.Nifti1Image(im, np.eye(4))
+    #     nib.save(n, os.path.join(tempdir, f"im{i:d}.nii.gz"))
 
-    images = sorted(glob(os.path.join(tempdir, "im*.nii.gz")))
-    segs = sorted(glob(os.path.join(tempdir, "seg*.nii.gz")))
+    #     n = nib.Nifti1Image(seg, np.eye(4))
+    #     nib.save(n, os.path.join(tempdir, f"seg{i:d}.nii.gz"))
+
+    images = sorted(glob(os.path.join(image_dir, "*.nii.gz")))
+    segs = sorted(glob(os.path.join(mask_dir, "*.nii.gz")))
+
+    print(f"found {len(images)} images and {len(segs)} masks.")
 
     # define transforms for image and segmentation
     train_imtrans = Compose(
         [
             ScaleIntensity(),
             EnsureChannelFirst(),
-            RandSpatialCrop((96, 96, 96), random_size=False),
-            RandRotate90(prob=0.5, spatial_axes=(0, 2)),
+            RandSpatialCrop((512, 512, 128), random_size=False),
+            # RandRotate90(prob=0.5, spatial_axes=(0, 2)),
         ]
     )
     train_segtrans = Compose(
         [
             EnsureChannelFirst(),
-            RandSpatialCrop((96, 96, 96), random_size=False),
-            RandRotate90(prob=0.5, spatial_axes=(0, 2)),
+            RandSpatialCrop((512, 512, 128), random_size=False),
+            # RandRotate90(prob=0.5, spatial_axes=(0, 2)),
         ]
     )
     val_imtrans = Compose([ScaleIntensity(), EnsureChannelFirst()])
@@ -81,7 +95,16 @@ def main(tempdir):
 
     # create a training data loader
     train_ds = ImageDataset(images[:20], segs[:20], transform=train_imtrans, seg_transform=train_segtrans)
-    train_loader = DataLoader(train_ds, batch_size=4, shuffle=True, num_workers=8, pin_memory=torch.cuda.is_available())
+    train_sampler = DistributedSampler(train_ds)
+    # train_loader = DataLoader(train_ds, batch_size=4, shuffle=True, num_workers=8, pin_memory=torch.cuda.is_available())
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=4,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+        sampler=train_sampler,
+    )
     # create a validation data loader
     val_ds = ImageDataset(images[-20:], segs[-20:], transform=val_imtrans, seg_transform=val_segtrans)
     val_loader = DataLoader(val_ds, batch_size=1, num_workers=4, pin_memory=torch.cuda.is_available())
@@ -89,7 +112,8 @@ def main(tempdir):
     post_trans = Compose([Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
 
     # create UNet, DiceLoss and Adam optimizer
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(f"cuda:{idist.get_local_rank()}")
+    torch.cuda.set_device(device)
     model = monai.networks.nets.UNet(
         spatial_dims=3,
         in_channels=1,
@@ -98,8 +122,9 @@ def main(tempdir):
         strides=(2, 2, 2, 2),
         num_res_units=2,
     ).to(device)
-    loss_function = monai.losses.DiceLoss(sigmoid=True)
+    loss_function = monai.losses.TverskyLoss(sigmoid=True, alpha=0.8, beta=0.2) #monai.losses.DiceLoss(sigmoid=True)
     optimizer = torch.optim.Adam(model.parameters(), 1e-3)
+    model = DistributedDataParallel(model, device_ids=[device])
 
     # start a typical PyTorch training
     val_interval = 2
@@ -108,17 +133,20 @@ def main(tempdir):
     epoch_loss_values = list()
     metric_values = list()
     writer = SummaryWriter()
-    for epoch in range(5):
+    num_epoch  =20
+    for epoch in range(num_epoch):
+        train_sampler.set_epoch(epoch)
         print("-" * 10)
-        print(f"epoch {epoch + 1}/{5}")
+        print(f"epoch {epoch + 1}/{num_epoch}")
         model.train()
         epoch_loss = 0
         step = 0
-        for batch_data in train_loader:
+        for batch_data in tqdm(train_loader):
             step += 1
             inputs, labels = batch_data[0].to(device), batch_data[1].to(device)
             optimizer.zero_grad()
             outputs = model(inputs)
+            # import pdb;pdb.set_trace();
             loss = loss_function(outputs, labels)
             loss.backward()
             optimizer.step()
@@ -160,15 +188,19 @@ def main(tempdir):
                     )
                 )
                 writer.add_scalar("val_mean_dice", metric, epoch + 1)
-                # plot the last model output as GIF image in TensorBoard with the corresponding image and label
-                plot_2d_or_3d_image(val_images, epoch + 1, writer, index=0, tag="image")
-                plot_2d_or_3d_image(val_labels, epoch + 1, writer, index=0, tag="label")
-                plot_2d_or_3d_image(val_outputs, epoch + 1, writer, index=0, tag="output")
-
+                if idist.get_local_rank() == 0:
+                    # plot the last model output as GIF image in TensorBoard with the corresponding image and label
+                    plot_2d_or_3d_image(val_images, epoch + 1, writer, index=0, tag="image")
+                    plot_2d_or_3d_image(val_labels, epoch + 1, writer, index=0, tag="label")
+                    plot_2d_or_3d_image(val_outputs, epoch + 1, writer, index=0, tag="output")
+                
+                idist.barrier()
     print(f"train completed, best_metric: {best_metric:.4f} at epoch: {best_metric_epoch}")
     writer.close()
 
+    dist.destroy_process_group()
+
 
 if __name__ == "__main__":
-    with tempfile.TemporaryDirectory() as tempdir:
-        main(tempdir)
+    # with tempfile.TemporaryDirectory() as tempdir:
+    main()
