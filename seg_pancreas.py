@@ -57,6 +57,8 @@ from ignite.metrics import Accuracy
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data.distributed import DistributedSampler
 
+from utils import stitch_images, postprocess
+
 def prepare_data(mode="3d", image_dir=None, mask_dir=None, file_format=None):
     if mode == "3d":
         filenames = sorted([os.path.basename(f) for f in glob(os.path.join(mask_dir, f"*{file_format}"))])
@@ -67,21 +69,21 @@ def prepare_data(mode="3d", image_dir=None, mask_dir=None, file_format=None):
             [
                 ScaleIntensity(),
                 EnsureChannelFirst(),
-                RandSpatialCrop((512, 512, 128), random_size=False),
+                RandSpatialCrop((512, 512, 64), random_size=False),
                 # RandRotate90(prob=0.5, spatial_axes=(0, 2)),
             ]
         )
         train_segtrans = Compose(
             [
                 EnsureChannelFirst(),
-                RandSpatialCrop((512, 512, 128), random_size=False),
+                RandSpatialCrop((512, 512, 64), random_size=False),
                 # RandRotate90(prob=0.5, spatial_axes=(0, 2)),
             ]
         )
         val_imtrans = Compose([ScaleIntensity(), EnsureChannelFirst()])
         val_segtrans = Compose([EnsureChannelFirst()])
 
-        train_ds = ImageDataset(images[:-200], segs[:-200], transform=train_imtrans, seg_transform=train_segtrans)
+        train_ds = ImageDataset(images[:-20], segs[:-20], transform=train_imtrans, seg_transform=train_segtrans)
         train_sampler = DistributedSampler(train_ds)
         # train_loader = DataLoader(train_ds, batch_size=4, shuffle=True, num_workers=8, pin_memory=torch.cuda.is_available())
         train_loader = DataLoader(
@@ -93,8 +95,8 @@ def prepare_data(mode="3d", image_dir=None, mask_dir=None, file_format=None):
             sampler=train_sampler,
         )
         # create a validation data loader
-        val_ds = ImageDataset(images[-200:], segs[-200:], transform=val_imtrans, seg_transform=val_segtrans)
-        val_loader = DataLoader(val_ds, batch_size=1, num_workers=4, pin_memory=torch.cuda.is_available())
+        val_ds = ImageDataset(images[-20:], segs[-20:], transform=val_imtrans, seg_transform=val_segtrans)
+        val_loader = DataLoader(val_ds, batch_size=1, num_workers=1, pin_memory=torch.cuda.is_available())
 
     else:
         filenames = sorted([os.path.basename(f) for f in glob(os.path.join(mask_dir, f"*{file_format}"))])
@@ -124,7 +126,7 @@ def prepare_data(mode="3d", image_dir=None, mask_dir=None, file_format=None):
             LoadImage(reader=PILReader,image_only=True, ensure_channel_first=True), 
             ScaleIntensity()])
 
-        train_ds = ArrayDataset(images[:-20], train_imtrans, segs[:-20], train_segtrans)
+        train_ds = ArrayDataset(images[:-200], train_imtrans, segs[:-200], train_segtrans)
         train_sampler = DistributedSampler(train_ds)
         train_loader = DataLoader(
             train_ds, 
@@ -133,8 +135,8 @@ def prepare_data(mode="3d", image_dir=None, mask_dir=None, file_format=None):
             num_workers=8, 
             pin_memory=True,
             sampler=train_sampler)
-        val_ds = ArrayDataset(images[-20:], val_imtrans, segs[-20:], val_segtrans)
-        val_loader = DataLoader(val_ds, batch_size=1, num_workers=4, pin_memory=torch.cuda.is_available())
+        val_ds = ArrayDataset(images[-200:], val_imtrans, segs[-200:], val_segtrans)
+        val_loader = DataLoader(val_ds, batch_size=1, num_workers=1, pin_memory=torch.cuda.is_available())
 
     print(f"found {len(images)} images and {len(segs)} masks. mask can be zero, so len(masks) <= len(images).")
     return train_ds, train_sampler, train_loader, val_ds, val_loader
@@ -171,7 +173,7 @@ def prepare_losses(mode):
     return loss
 
 
-def main(mode="3d"):
+def main(mode="3d", disable_tb=False):
     monai.config.print_config()
     logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
@@ -219,13 +221,14 @@ def main(mode="3d"):
     model = DistributedDataParallel(model, device_ids=[device])
 
     # start a typical PyTorch training
-    val_interval = 2
+    val_interval = 1
     best_metric = -1
     best_metric_epoch = -1
     epoch_loss_values = list()
     metric_values = list()
-    writer = SummaryWriter()
-    num_epoch  =20
+    if not disable_tb:
+        writer = SummaryWriter()
+    num_epoch  = 50
     for epoch in range(num_epoch):
         train_sampler.set_epoch(epoch)
         print("-" * 10)
@@ -245,7 +248,8 @@ def main(mode="3d"):
             epoch_loss += loss.item()
             epoch_len = len(train_ds) // train_loader.batch_size
             print(f"{step}/{epoch_len}, train_loss: {loss.item():.4f}")
-            writer.add_scalar("train_loss", loss.item(), epoch_len * epoch + step)
+            if not disable_tb:
+                writer.add_scalar("train_loss", loss.item(), epoch_len * epoch + step)
         epoch_loss /= step
         epoch_loss_values.append(epoch_loss)
         print(f"epoch {epoch + 1} average loss: {epoch_loss:.4f}")
@@ -256,13 +260,48 @@ def main(mode="3d"):
                 val_images = None
                 val_labels = None
                 val_outputs = None
-                for val_data in val_loader:
+                for idx_val, val_data in enumerate(val_loader):
                     val_images, val_labels = val_data[0].to(device), val_data[1].to(device)
                     sw_batch_size = 4
                     val_outputs = sliding_window_inference(val_images, roi_size, sw_batch_size, model)
-                    val_outputs = [post_trans(i) for i in decollate_batch(val_outputs)]
+                    # import pdb;pdb.set_trace()
+                    val_outputs_digit = [i for i in decollate_batch(val_outputs)]
+                    val_outputs = [post_trans(i) for i in val_outputs_digit]
                     # compute metric for current iteration
                     dice_metric(y_pred=val_outputs, y=val_labels)
+
+                    if idist.get_local_rank() == 0 and idx_val % 20 == 0:
+                        # plot the last model output as GIF image in TensorBoard with the corresponding image and label
+                        # print(val_images.shape)
+                        # print(val_labels.shape)
+                        # print(val_outputs.shape)
+                        # import pdb;pdb.set_trace()
+                        # plot_2d_or_3d_image(val_images, epoch + 1, writer, index=0, tag="image")
+                        # plot_2d_or_3d_image(val_labels, epoch + 1, writer, index=0, tag="label")
+                        # plot_2d_or_3d_image(val_outputs, epoch + 1, writer, index=0, tag="output")
+                        if mode=="2d":
+                            images = stitch_images(
+                                postprocess(val_images),
+                                postprocess(val_labels),
+                                postprocess(val_outputs_digit[0][None]),
+                                postprocess(val_outputs[0][None]),
+                                img_per_row=1
+                            )
+                        else:
+                            random_slices_idx = [np.random.randint(0,val_outputs[0].shape[-1]) for _ in range(4)]
+                            # import pdb;pdb.set_trace()
+                            images = stitch_images(
+                                postprocess(val_images[0, :, :, :, random_slices_idx].permute(3, 0, 1, 2)),
+                                postprocess(val_labels[0, :, :, :, random_slices_idx].permute(3, 0, 1, 2)),
+                                postprocess(val_outputs_digit[0][:, :, :, random_slices_idx].permute(3, 0, 1, 2)),
+                                postprocess(val_outputs[0][:, :, :, random_slices_idx].permute(3, 0, 1, 2)),
+                                img_per_row=1
+                            )
+                        name = os.path.join(os.getcwd(), "runs", f"{mode}_output", f"{epoch}_{idx_val}.png")
+                        print('\nsaving sample: ' + name)
+                        images.save(name)
+                    idist.barrier()
+
                 # aggregate the final mean dice result
                 metric = dice_metric.aggregate().item()
                 # reset the status for next validation round
@@ -278,15 +317,12 @@ def main(mode="3d"):
                         epoch + 1, metric, best_metric, best_metric_epoch
                     )
                 )
-                writer.add_scalar("val_mean_dice", metric, epoch + 1)
-                if idist.get_local_rank() == 0:
-                    # plot the last model output as GIF image in TensorBoard with the corresponding image and label
-                    plot_2d_or_3d_image(val_images, epoch + 1, writer, index=0, tag="image")
-                    plot_2d_or_3d_image(val_labels, epoch + 1, writer, index=0, tag="label")
-                    plot_2d_or_3d_image(val_outputs, epoch + 1, writer, index=0, tag="output")
-                idist.barrier()
+                if not disable_tb:
+                    writer.add_scalar("val_mean_dice", metric, epoch + 1)
+            
     print(f"train completed, best_metric: {best_metric:.4f} at epoch: {best_metric_epoch}")
-    writer.close()
+    if not disable_tb:
+        writer.close()
 
     dist.destroy_process_group()
 
@@ -302,6 +338,12 @@ if __name__ == "__main__":
         required=False,
         help="Model definition",
     )
+    parser.add_argument(
+        "--disable_tb",
+        action="store_true",
+        required=False,
+        help="Force disable tensorboard for debugging",
+    )
     args = parser.parse_args()
     print(f"mode is {args.mode}")
-    main(args.mode)
+    main(args.mode, args.disable_tb)
