@@ -23,7 +23,8 @@ from torch.utils.tensorboard import SummaryWriter
 
 import monai
 from monai.data import (
-    ImageDataset, ArrayDataset, create_test_image_3d, decollate_batch, DataLoader
+    # ImageDataset, 
+    ArrayDataset, create_test_image_3d, decollate_batch, DataLoader
 )
 from monai.inferers import sliding_window_inference
 from monai.metrics import (
@@ -36,7 +37,7 @@ from monai.transforms import (
     Compose,
     LoadImage,
     RandRotate90,
-    RandSpatialCrop,
+    # RandSpatialCrop,
     ScaleIntensity,
 )
 from monai.data.image_reader import (
@@ -58,10 +59,25 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data.distributed import DistributedSampler
 
 from utils import stitch_images, postprocess
+import pandas as pd
+from icassp_dataprocess.data_preprocess import get_Z_location
+
+from modified_monai.dataset.image_dataset import (
+    ImageDataset
+)
 
 def prepare_data(mode="3d", image_dir=None, mask_dir=None, file_format=None):
     if mode == "3d":
+        from modified_monai.transforms.rand_slice_crop import (
+            RandSpatialCrop
+        )
+
+        Z_location, remove_set = get_Z_location(image_dir)
+
+        # import pdb;pdb.set_trace()
         filenames = sorted([os.path.basename(f) for f in glob(os.path.join(mask_dir, f"*{file_format}"))])
+        filenames = list(filter(lambda x: x in set(Z_location.keys()) and x not in remove_set, filenames))
+
         images = [os.path.join(image_dir, filename) for filename in filenames]
         segs = [os.path.join(mask_dir, filename) for filename in filenames]
 
@@ -69,15 +85,17 @@ def prepare_data(mode="3d", image_dir=None, mask_dir=None, file_format=None):
             [
                 ScaleIntensity(),
                 EnsureChannelFirst(),
-                RandSpatialCrop((512, 512, 64), random_size=False),
+                # RandSpatialCrop((512, 512, 64), random_size=False),
                 # RandRotate90(prob=0.5, spatial_axes=(0, 2)),
+                RandSpatialCrop(roi_size=(512, 512, 64), slice_dict=Z_location),
             ]
         )
         train_segtrans = Compose(
             [
                 EnsureChannelFirst(),
-                RandSpatialCrop((512, 512, 64), random_size=False),
+                # RandSpatialCrop((512, 512, 64), random_size=False),
                 # RandRotate90(prob=0.5, spatial_axes=(0, 2)),
+                RandSpatialCrop(roi_size=(512, 512, 64), slice_dict=Z_location),
             ]
         )
         val_imtrans = Compose([ScaleIntensity(), EnsureChannelFirst()])
@@ -99,31 +117,36 @@ def prepare_data(mode="3d", image_dir=None, mask_dir=None, file_format=None):
         val_loader = DataLoader(val_ds, batch_size=1, num_workers=1, pin_memory=torch.cuda.is_available())
 
     else:
+        from monai.transforms import (
+            RandSpatialCrop
+        )
+        reader = None if ".nii.gz" in file_format else PILReader
+
         filenames = sorted([os.path.basename(f) for f in glob(os.path.join(mask_dir, f"*{file_format}"))])
         # filenames = [filename.split(".")[0]+filename.split(".")[-1] for filename in filenames]
         images = [os.path.join(image_dir, filename) for filename in filenames]
         segs = [os.path.join(mask_dir, filename) for filename in filenames]
         train_imtrans = Compose(
             [
-                LoadImage(reader=PILReader, image_only=True, ensure_channel_first=True),
+                LoadImage(reader=reader, image_only=True, ensure_channel_first=True),
                 ScaleIntensity(),
-                RandSpatialCrop((512, 512), random_size=False),
+                RandSpatialCrop((512, 512, 1), random_size=False),
                 # RandRotate90(prob=0.5, spatial_axes=(0, 1)),
             ]
         )
         train_segtrans = Compose(
             [
-                LoadImage(reader=PILReader, image_only=True, ensure_channel_first=True),
+                LoadImage(reader=reader, image_only=True, ensure_channel_first=True),
                 ScaleIntensity(),
-                RandSpatialCrop((512, 512), random_size=False),
+                RandSpatialCrop((512, 512, 1), random_size=False),
                 # RandRotate90(prob=0.5, spatial_axes=(0, 1)),
             ]
         )
         val_imtrans = Compose([
-            LoadImage(reader=PILReader,image_only=True, ensure_channel_first=True), 
+            LoadImage(reader=reader,image_only=True, ensure_channel_first=True), 
             ScaleIntensity()])
         val_segtrans = Compose([
-            LoadImage(reader=PILReader,image_only=True, ensure_channel_first=True), 
+            LoadImage(reader=reader,image_only=True, ensure_channel_first=True), 
             ScaleIntensity()])
 
         train_ds = ArrayDataset(images[:-200], train_imtrans, segs[:-200], train_segtrans)
@@ -187,7 +210,7 @@ def main(mode="3d", disable_tb=False):
     else:
         image_dir='/raid/datasets/origin_generated_2d_slices/images_A'
         mask_dir='/raid/datasets/origin_generated_2d_slices/Mask_A'
-        file_format=".png"
+        file_format=".nii.gz"
         roi_size = (512, 512)
 
     ## previously we iterate two folders independently
@@ -240,6 +263,11 @@ def main(mode="3d", disable_tb=False):
             step += 1
             inputs, labels = batch_data[0].to(device), batch_data[1].to(device)
             optimizer.zero_grad()
+
+            ## handle cases 2d images might be read from 3d nib
+            if mode=="2d" and len(inputs.shape)>4:
+                inputs, labels = inputs[...,0], labels[..., 0]
+
             outputs = model(inputs)
             # import pdb;pdb.set_trace();
             loss = loss_function(outputs, labels)
@@ -263,6 +291,11 @@ def main(mode="3d", disable_tb=False):
                 for idx_val, val_data in enumerate(val_loader):
                     val_images, val_labels = val_data[0].to(device), val_data[1].to(device)
                     sw_batch_size = 4
+
+                    ## handle cases 2d images might be read from 3d nib
+                    if mode=="2d" and len(val_images.shape)>4:
+                        val_images, val_labels = val_images[...,0], val_labels[...,0]
+
                     val_outputs = sliding_window_inference(val_images, roi_size, sw_batch_size, model)
                     # import pdb;pdb.set_trace()
                     val_outputs_digit = [i for i in decollate_batch(val_outputs)]
@@ -270,7 +303,7 @@ def main(mode="3d", disable_tb=False):
                     # compute metric for current iteration
                     dice_metric(y_pred=val_outputs, y=val_labels)
 
-                    if idist.get_local_rank() == 0 and idx_val % 20 == 0:
+                    if idist.get_local_rank() == 0:
                         # plot the last model output as GIF image in TensorBoard with the corresponding image and label
                         # print(val_images.shape)
                         # print(val_labels.shape)
@@ -279,7 +312,7 @@ def main(mode="3d", disable_tb=False):
                         # plot_2d_or_3d_image(val_images, epoch + 1, writer, index=0, tag="image")
                         # plot_2d_or_3d_image(val_labels, epoch + 1, writer, index=0, tag="label")
                         # plot_2d_or_3d_image(val_outputs, epoch + 1, writer, index=0, tag="output")
-                        if mode=="2d":
+                        if mode=="2d" and idx_val % 10 == 0:
                             images = stitch_images(
                                 postprocess(val_images),
                                 postprocess(val_labels),
@@ -287,7 +320,10 @@ def main(mode="3d", disable_tb=False):
                                 postprocess(val_outputs[0][None]),
                                 img_per_row=1
                             )
-                        else:
+                            name = os.path.join(os.getcwd(), "runs", f"{mode}_output", f"{epoch}_{idx_val}.png")
+                            print('\nsaving sample: ' + name)
+                            images.save(name)
+                        elif mode=="3d" and idx_val % 2 == 0:
                             random_slices_idx = [np.random.randint(0,val_outputs[0].shape[-1]) for _ in range(4)]
                             # import pdb;pdb.set_trace()
                             images = stitch_images(
@@ -297,9 +333,9 @@ def main(mode="3d", disable_tb=False):
                                 postprocess(val_outputs[0][:, :, :, random_slices_idx].permute(3, 0, 1, 2)),
                                 img_per_row=1
                             )
-                        name = os.path.join(os.getcwd(), "runs", f"{mode}_output", f"{epoch}_{idx_val}.png")
-                        print('\nsaving sample: ' + name)
-                        images.save(name)
+                            name = os.path.join(os.getcwd(), "runs", f"{mode}_output", f"{epoch}_{idx_val}.png")
+                            print('\nsaving sample: ' + name)
+                            images.save(name)
                     idist.barrier()
 
                 # aggregate the final mean dice result
