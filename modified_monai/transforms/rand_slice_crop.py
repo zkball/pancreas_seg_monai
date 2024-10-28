@@ -101,10 +101,12 @@ class RandSpatialCrop(Randomizable, Crop):
         # random_center: bool = True,
         # random_size: bool = False,
         lazy: bool = False,
+        stride_slice: int = 1,
     ) -> None:
         super().__init__(lazy)
         self.roi_size = roi_size
         self.slice_dict = slice_dict
+        self.stride_slice = stride_slice
 
     # def randomize(self, img_size: Sequence[int]) -> None:
     #     self._size = fall_back_tuple(self.roi_size, img_size)
@@ -133,12 +135,14 @@ class RandSpatialCrop(Randomizable, Crop):
         idx_lack = num_slices - interval
         if idx_lack>0: ## we lack valid slices
             rnd_begin = max(0, idx_start-np.random.randint(0,idx_lack))
+            if rnd_begin+num_slices>=idx_last:
+                rnd_begin=idx_last-num_slices
         elif idx_lack<0: ## there are abundant frames
             rnd_begin = idx_start+np.random.randint(0,-idx_lack)
         else:
             rnd_begin = idx_start
             
-        img = img[..., rnd_begin:rnd_begin+num_slices]
+        img = img[..., rnd_begin:rnd_begin+num_slices:self.stride_slice]
 
         return img
 

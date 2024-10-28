@@ -66,6 +66,8 @@ from modified_monai.dataset.image_dataset import (
     ImageDataset
 )
 
+from modified_monai.metrics.dce import DCE
+
 def prepare_data(mode="3d", image_dir=None, mask_dir=None, file_format=None):
     if mode == "3d":
         from modified_monai.transforms.rand_slice_crop import (
@@ -87,21 +89,32 @@ def prepare_data(mode="3d", image_dir=None, mask_dir=None, file_format=None):
                 EnsureChannelFirst(),
                 # RandSpatialCrop((512, 512, 64), random_size=False),
                 # RandRotate90(prob=0.5, spatial_axes=(0, 2)),
-                RandSpatialCrop(roi_size=(512, 512, 64), slice_dict=Z_location),
+                RandSpatialCrop(roi_size=(512, 512, 64), slice_dict=Z_location, stride_slice=4),
             ]
         )
-        train_segtrans = Compose(
+        # train_segtrans = Compose(
+        #     [
+        #         EnsureChannelFirst(),
+        #         # RandSpatialCrop((512, 512, 64), random_size=False),
+        #         # RandRotate90(prob=0.5, spatial_axes=(0, 2)),
+        #         RandSpatialCrop(roi_size=(512, 512, 64), slice_dict=Z_location, stride_slice=4),
+        #     ]
+        # )
+        val_imtrans = Compose(
             [
+                ScaleIntensity(), 
                 EnsureChannelFirst(),
-                # RandSpatialCrop((512, 512, 64), random_size=False),
-                # RandRotate90(prob=0.5, spatial_axes=(0, 2)),
-                RandSpatialCrop(roi_size=(512, 512, 64), slice_dict=Z_location),
+                RandSpatialCrop(roi_size=(512, 512, 64), slice_dict=Z_location, stride_slice=4),
             ]
         )
-        val_imtrans = Compose([ScaleIntensity(), EnsureChannelFirst()])
-        val_segtrans = Compose([EnsureChannelFirst()])
+        # val_segtrans = Compose(
+        #     [
+        #         EnsureChannelFirst(),
+        #         RandSpatialCrop(roi_size=(512, 512, 64), slice_dict=Z_location, stride_slice=3),
+        #     ]
+        # )
 
-        train_ds = ImageDataset(images[:-20], segs[:-20], transform=train_imtrans, seg_transform=train_segtrans)
+        train_ds = ImageDataset(images[:-40], segs[:-40], transform=train_imtrans, seg_transform=train_imtrans)
         train_sampler = DistributedSampler(train_ds)
         # train_loader = DataLoader(train_ds, batch_size=4, shuffle=True, num_workers=8, pin_memory=torch.cuda.is_available())
         train_loader = DataLoader(
@@ -113,7 +126,7 @@ def prepare_data(mode="3d", image_dir=None, mask_dir=None, file_format=None):
             sampler=train_sampler,
         )
         # create a validation data loader
-        val_ds = ImageDataset(images[-20:], segs[-20:], transform=val_imtrans, seg_transform=val_segtrans)
+        val_ds = ImageDataset(images[-40:], segs[-40:], transform=val_imtrans, seg_transform=val_imtrans)
         val_loader = DataLoader(val_ds, batch_size=1, num_workers=1, pin_memory=torch.cuda.is_available())
 
     else:
@@ -149,7 +162,7 @@ def prepare_data(mode="3d", image_dir=None, mask_dir=None, file_format=None):
             LoadImage(reader=reader,image_only=True, ensure_channel_first=True), 
             ScaleIntensity()])
 
-        train_ds = ArrayDataset(images[:-200], train_imtrans, segs[:-200], train_segtrans)
+        train_ds = ArrayDataset(images[:-1000], train_imtrans, segs[:-1000], train_segtrans)
         train_sampler = DistributedSampler(train_ds)
         train_loader = DataLoader(
             train_ds, 
@@ -158,7 +171,7 @@ def prepare_data(mode="3d", image_dir=None, mask_dir=None, file_format=None):
             num_workers=8, 
             pin_memory=True,
             sampler=train_sampler)
-        val_ds = ArrayDataset(images[-200:], val_imtrans, segs[-200:], val_segtrans)
+        val_ds = ArrayDataset(images[-1000:], val_imtrans, segs[-1000:], val_segtrans)
         val_loader = DataLoader(val_ds, batch_size=1, num_workers=1, pin_memory=torch.cuda.is_available())
 
     print(f"found {len(images)} images and {len(segs)} masks. mask can be zero, so len(masks) <= len(images).")
@@ -166,6 +179,7 @@ def prepare_data(mode="3d", image_dir=None, mask_dir=None, file_format=None):
 
 def prepare_model(mode):
     if mode == "3d":
+        # from modified_monai.nets.unet import UNet
         model = monai.networks.nets.UNet(
             spatial_dims=3,
             in_channels=1,
@@ -173,6 +187,7 @@ def prepare_model(mode):
             channels=(16, 32, 64, 128, 256),
             strides=(2, 2, 2, 2),
             num_res_units=2,
+            kernel_size = 5,
         )
     else:
         model = monai.networks.nets.UNet(
@@ -182,6 +197,7 @@ def prepare_model(mode):
             channels=(16, 32, 64, 128, 256),
             strides=(2, 2, 2, 2),
             num_res_units=2,
+            kernel_size = 5,
         )
 
     return model
@@ -232,7 +248,7 @@ def main(mode="3d", disable_tb=False):
     # im, seg = monai.utils.misc.first(check_loader)
     # print(im.shape, seg.shape)
 
-    dice_metric = MeanIoU(include_background=False, reduction="mean", get_not_nans=False)
+    dice_metric = DCE(include_background=False, reduction="mean", get_not_nans=False)
     post_trans = Compose([Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
 
     # create UNet, DiceLoss and Adam optimizer
@@ -240,7 +256,8 @@ def main(mode="3d", disable_tb=False):
     torch.cuda.set_device(device)
     model = prepare_model(mode=mode).to(device)
     loss_function = prepare_losses(mode=mode)
-    optimizer = torch.optim.Adam(model.parameters(), 1e-3)
+    learning_rate = 1e-3 if mode=="2d" else 5e-3 
+    optimizer = torch.optim.Adam(model.parameters(), )
     model = DistributedDataParallel(model, device_ids=[device])
 
     # start a typical PyTorch training
@@ -251,7 +268,7 @@ def main(mode="3d", disable_tb=False):
     metric_values = list()
     if not disable_tb:
         writer = SummaryWriter()
-    num_epoch  = 50
+    num_epoch  = 50 if mode=="2d" else 1000
     for epoch in range(num_epoch):
         train_sampler.set_epoch(epoch)
         print("-" * 10)
@@ -268,6 +285,7 @@ def main(mode="3d", disable_tb=False):
             if mode=="2d" and len(inputs.shape)>4:
                 inputs, labels = inputs[...,0], labels[..., 0]
 
+            # import pdb;pdb.set_trace();
             outputs = model(inputs)
             # import pdb;pdb.set_trace();
             loss = loss_function(outputs, labels)
