@@ -126,6 +126,12 @@ if __name__ == '__main__':
         help="Generate 2d slices in .nii.gz format",
     )
     parser.add_argument(
+        "--no_mask",
+        action="store_true",
+        required=False,
+        help="No mask",
+    )
+    parser.add_argument(
         "--crop_slice_dim",
         action="store_true",
         required=False,
@@ -134,24 +140,27 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     # An example for loading nii.gz file
-    image_dir = "/raid/datasets/origin/images_A"
-    mask_dir = "/raid/datasets/origin/Mask_A"
+    image_dir = "/raid/datasets/207file/images_A2"
+    mask_dir = None #"/raid/datasets/origin/Mask_A"
     
     Z_location, remove_set = get_Z_location(image_dir)
 
     ## main functions
     if args.gen_2d:
         print("Generating 2d data. please wait...")
-        image_save_dir = '/raid/datasets/origin_generated_2d_slices/images_A'
-        mask_save_dir = '/raid/datasets/origin_generated_2d_slices/Mask_A'
-        os.makedirs(image_save_dir, exist_ok=True)
-        os.makedirs(mask_save_dir, exist_ok=True)
+        image_save_dir = '/raid/datasets/207file_generated_2d_slices/images_A'
+        mask_save_dir = None #'/raid/datasets/origin_generated_2d_slices/Mask_A'
+        if image_save_dir is not None:
+            os.makedirs(image_save_dir, exist_ok=True)
+        if mask_save_dir is not None:
+            os.makedirs(mask_save_dir, exist_ok=True)
 
         for sample_name in tqdm(os.listdir(image_dir)):
             # import pdb;pdb.set_trace()
-            if sample_name not in remove_set:
+            valid_index = None
+            if (mask_dir is not None) and (not sample_name not in remove_set):
                 valid_index = nii_gz_2_png(mask_dir, sample_name, mask_save_dir, 'mask')
-                nii_gz_2_png(image_dir, sample_name, image_save_dir, 'image', valid_idx=valid_index)
+            nii_gz_2_png(image_dir, sample_name, image_save_dir, 'image', valid_idx=valid_index)
 
 
     if args.get_stat:
