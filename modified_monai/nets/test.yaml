@@ -1,0 +1,176 @@
+version: 2
+schedule: '@once'
+tasks:
+- name: 29-voxelgrid-image-generation
+  inputs:
+  - workflow: qying-val-flavor-cones-part8
+    run: 2024.10.18-0529-2owm33yv7ppwt
+    task: 5-move-export-sessions
+    selector: (\w{8}-\w{4}-\w{4}-\w{4}-\w{12})/.+
+    prefix: segment_data
+  - workflow: qying-val-flavor-cones-part8
+    run: 2024.10.18-0529-2owm33yv7ppwt
+    task: 2-export-rigs
+    selector: ^(\w{8}-\w{4}-\w{4}-\w{4}-\w{12})/rig\.json$
+    prefix: rig
+  - workflow: qying-val-flavor-cones-part8
+    run: 2024.10.18-0529-2owm33yv7ppwt
+    task: 14-egomotion-indexer
+    selector: (\w{8}-\w{4}-\w{4}-\w{4}-\w{12})/.+
+    prefix: egomotion
+  - workflow: qying-val-flavor-cones-part8
+    run: 2024.10.18-0529-2owm33yv7ppwt
+    task: 21-dynamic-layer-dispatcher
+    selector: (\w{8}-\w{4}-\w{4}-\w{4}-\w{12})/.+
+    prefix: transcoded_data
+  - workflow: qying-val-flavor-cones-part8
+    run: 2024.10.18-0529-2owm33yv7ppwt
+    task: 24-cloud-aggregation
+    selector: (\w{8}-\w{4}-\w{4}-\w{4}-\w{12})/.+
+    prefix: aggregated_lidar
+  - workflow: qying-val-flavor-cones-part8
+    run: 2024.10.18-0529-2owm33yv7ppwt
+    task: 26-voxelgrid-generator
+    selector: (\w{8}-\w{4}-\w{4}-\w{4}-\w{12})/.+
+    prefix: voxelgrid
+  - workflow: qying-val-flavor-cones-part8
+    run: 2024.10.18-0529-2owm33yv7ppwt
+    task: 28-camera-indexer
+    selector: (\w{8}-\w{4}-\w{4}-\w{4}-\w{12})/.+
+    prefix: transcoded_data
+  image: docker-nvmap.artifactory.addp.nvda.ai/bazel.pycsft.workflows.voxelgrid_generator.voxelgrid_renderer_image:184e76b788f3@sha256:184e76b788f372a790d92ce90d03b2be0f0a04c63ed774b65344b763190088a4
+  command: /bin/bash
+  args:
+  - -euxo
+  - pipefail
+  - -c
+  - |
+    SEGMENT_ID={{job_id}}
+    SESSION_ID=$(cat {{input}}/segment_data/session_id.txt )
+    OUTPUT_DIR={{output}}/$SEGMENT_ID
+    mkdir -p $OUTPUT_DIR
+    pycsft/workflows/voxelgrid_generator/voxelgrid_renderer record_occupancy \
+      {{input}}/voxelgrid \
+      --output_dir $OUTPUT_DIR \
+      --rig_file {{input}}/rig/rig.json \
+      --egomotion {{input}}/egomotion \
+      --segment-config $SEGMENT_ID\ {{input}}/segment_data \
+      --session-data {{input}}/transcoded_data \
+      --session_id $SESSION_ID \
+      --use-lidar \
+      --use-aggregated-lidar {{input}}/aggregated_lidar \
+      --record_frame
+  cache: disable
+  jobTimeout: 10h
+  jobConcurrency: 4
+  workerPool: voxelgrid-generator-workerpool
+  stripGroupPrefix: true
+  env:
+    NUMPY_MADVISE_HUGEPAGE: "0"
+  outputs:
+  - retentionPolicy:
+      default: 45d
+  failAction: stop-branch
+- name: 30-video-generation
+  inputs:
+  - workflow: qying-val-flavor-cones-part8
+    run: 2024.10.18-0529-2owm33yv7ppwt
+    task: 29-voxelgrid-image-generation
+    selector: (\w{8}-\w{4}-\w{4}-\w{4}-\w{12})/recorded_output/occupancy_[0-9]+\.jpg
+  image: docker-nvmap.artifactory.addp.nvda.ai/nvcr.io/nv-maglev/ubuntu-ffmpeg:latest
+  command: /bin/bash
+  args:
+  - -euxo
+  - pipefail
+  - -c
+  - "SESSION_ID=$(basename {{job_id}})\n\nODIR={{output}}/{{job_id}}\nmkdir -p $ODIR\n\nVIDEO_NAME=$ODIR/${SESSION_ID}_output_video.mp4\n\nFILES=images.txt\n\nfor
+    img in $(find {{input}} -type f \\( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg'
+    -o -name '*.tif' -o -name '*.tiff' \\) | sort -V);\ndo echo file $img >> $FILES;\ndone\n\nffmpeg
+    -f concat -safe 0 -r 10 -i $FILES -c:v libx264 \\\n-pix_fmt yuv420p -r 25 -crf
+    12 -vf scale=-1:1080 $VIDEO_NAME\nVIDEO_NAME_HLS=$ODIR/${SESSION_ID}_output_video.m3u8\nffmpeg
+    -f concat -safe 0 -r 10 -i $FILES \\\n -vf 'format=yuv420p,scale=-1:1080' \\\n-c:v
+    libx264 -crf 12 -g 60 -r 25 -hls_time 2 -hls_list_size 0 $VIDEO_NAME_HLS "
+  cache: success
+  jobConcurrency: 6
+  workerPool: video-generation-workerpool-10fps-12
+  outputs:
+  - url: swift://swiftstack.nvidia.cn/team-perception-gt/candy-kingdom/
+    path: msfnet_occupancy_v2_1
+    storageSecret: s3-creds
+- name: 31-video-meta-generator
+  inputs:
+  - workflow: qying-val-flavor-cones-part8
+    run: 2024.10.18-0529-2owm33yv7ppwt
+    task: 29-voxelgrid-image-generation
+    selector: (\w{8}-\w{4}-\w{4}-\w{4}-\w{12})/.+
+  image: docker-nvmap.artifactory.addp.nvda.ai/bazel.dlav.autolabeling.workflows.topview_gt_generator.pycsft_image:8911f4128be3@sha256:8911f4128be3dc8984bc66f96e4374f1bc76cb5e2e14bf98c09f04a5356d663c
+  command: /bin/bash
+  args:
+  - -euxo
+  - pipefail
+  - -c
+  - "SESSION_ID={{job_id}}\nINPUT_DIR={{input}}\nODIR={{output}}/$SESSION_ID\nmkdir
+    -p $ODIR\n\ndlav/autolabeling/workflows/topview_gt_generator/video_meta_generator
+    \\\n --session-id $SESSION_ID \\\n --o $ODIR/meta.json \\\n --input-dir $INPUT_DIR/
+    \\\n --input-frame-rate 10 \\\n --output-fps 25 \\\n --pickle "
+  jobRetries: 1
+  jobTimeout: 4h
+  jobConcurrency: 4
+  workerPool: video-meta-generation
+  env:
+    NUMPY_MADVISE_HUGEPAGE: "0"
+    PYTHONUNBUFFERED: "1"
+  outputs:
+  - url: swift://swiftstack.nvidia.cn/team-perception-gt/candy-kingdom/
+    path: msfnet_occupancy_v2_1
+    storageSecret: s3-creds
+workerPools:
+- name: voxelgrid-generator-workerpool
+  workers: 128
+  cpu: "12"
+  gpu: "1"
+  mem: 64Gi
+  disk: 150Gi
+  ioCache: mem
+  ioCacheSize: 2Gi
+  ioCacheBlockSize: 8MiB
+  resourceShare: perception-slurm
+  nodeConstraints:
+    required:
+      nodeType: dgx1v
+- name: video-generation-workerpool-10fps-12
+  workers: 64
+  cpu: "12"
+  gpu: "0"
+  mem: 64Gi
+  disk: 48Gi
+- name: video-meta-generation
+  workers: 64
+  cpu: "4"
+  gpu: "0"
+  mem: 48Gi
+  disk: 32Gi
+userId: 09e35dca-cffb-4869-af49-f23894975e18
+userEmail: qying@nvidia.com
+createdAt: "2024-10-16T07:44:37.096Z"
+updatedTime: "2024-10-28T04:56:35.209Z"
+resourceShare: gtaas-adc
+tags:
+  command: /pycsft/workflows/voxelgrid_generator/run_workflow.py --image_metadata
+    pycsft/workflows/voxelgrid_generator/run_workflow_metadata.json voxelgrid.gt --flavor
+    msfnet-validation -- --resource-share genpop-adc --name qying-v2p1-val-base --remote_registry
+    docker.addpchina.com --remote_image_prefix docker.addpchina.com
+  command_trigger_time: "2024-09-28T04:05:12+00:00"
+  cost-center: av_ndas_preprocessing
+  git_commit_author_email: ninxu@nvidia.com
+  git_commit_author_name: Ning Xu
+  git_commit_authored_datetime: "2024-08-30T18:00:49-07:00"
+  git_commit_committed_datetime: "2024-08-30T18:00:49-07:00"
+  git_commit_sha: 23ad89b14700903cc570af601cb5082a6394295f
+  git_commit_summary: '[MSFNetGT] Update commit hash after cloud aggregtion fix'
+  git_has_uncommitted_changes: "true"
+specHash: e1fda538697ab732e61ebbfa9978682473a9106c5e11257cd38f8dbef41883e8
+retentionPolicy:
+  default: 45d
+schedulingPriority: HIGHEST
+

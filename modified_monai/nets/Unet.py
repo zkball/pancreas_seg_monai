@@ -23,6 +23,17 @@ from monai.networks.layers.simplelayers import SkipConnection
 
 __all__ = ["UNet", "Unet"]
 
+class Wrap(nn.Module):
+    def __init__(self, layer, data_collection: list):
+        super(Wrap, self).__init__()
+        self.data_collection = data_collection  # Store a reference to the main model
+        self.layer = layer
+
+    def forward(self, x):
+        # Perform some operations (e.g., a linear transformation)
+        out = self.layer(x)  # Example operation
+        self.data_collection.append(out)  # Collect output directly in the main model
+        return out
 
 class UNet(nn.Module):
     """
@@ -118,8 +129,11 @@ class UNet(nn.Module):
         dropout: float = 0.0,
         bias: bool = True,
         adn_ordering: str = "NDA",
+        classification: list = [],
     ) -> None:
         super().__init__()
+        self.output_encoder = []
+        self.output_decoder = []
 
         if len(channels) < 2:
             raise ValueError("the length of `channels` should be no less than 2.")
@@ -174,12 +188,81 @@ class UNet(nn.Module):
                 subblock = self._get_bottom_layer(c, channels[1])
                 upc = c + channels[1]
 
-            down = self._get_down_layer(inc, c, s, is_top)  # create layer in downsampling path
-            up = self._get_up_layer(upc, outc, s, is_top)  # create layer in upsampling path
+            down = self._get_down_layer(inc, c, s, is_top, data_collection=self.output_encoder)  # create layer in downsampling path
+            up = self._get_up_layer(upc, outc, s, is_top, data_collection=self.output_decoder)  # create layer in upsampling path
 
             return self._get_connection_block(down, up, subblock)
 
         self.model = _create_block(in_channels, out_channels, self.channels, self.strides, True)
+        
+
+        """
+        additional setups in the below
+        """
+        self.classification = classification
+        self.class_channels = self.out_channels #-self.in_channels
+        if len(self.classification)>0:
+            self.middle_class_mlp = nn.ModuleList([])
+            for idx in range(len(self.classification)):
+                self.middle_class_mlp.append(
+                            nn.Sequential(
+                                # ResidualUnit(
+                                #     self.dimensions,
+                                #     (len(strides)+1)[0],
+                                #     channels[0],
+                                #     strides=2,
+                                #     kernel_size=self.kernel_size,
+                                #     subunits=2,
+                                #     act=self.act,
+                                #     norm=self.norm,
+                                #     dropout=self.dropout,
+                                #     bias=self.bias,
+                                #     adn_ordering=self.adn_ordering,
+                                # ),
+                                Convolution(
+                                    self.dimensions,
+                                    self.class_channels,
+                                    2*self.class_channels,
+                                    strides=2,
+                                    kernel_size=self.kernel_size,
+                                    act=self.act,
+                                    norm=self.norm,
+                                    dropout=self.dropout,
+                                    bias=self.bias,
+                                    adn_ordering=self.adn_ordering,
+                                ),
+                                Convolution(
+                                    self.dimensions,
+                                    2*self.class_channels,
+                                    4*self.class_channels,
+                                    strides=2,
+                                    kernel_size=self.kernel_size,
+                                    act=self.act,
+                                    norm=self.norm,
+                                    dropout=self.dropout,
+                                    bias=self.bias,
+                                    adn_ordering=self.adn_ordering,
+                                ),
+                                Convolution(
+                                    self.dimensions,
+                                    4*self.class_channels,
+                                    8*self.class_channels,
+                                    strides=2,
+                                    kernel_size=self.kernel_size,
+                                    act=self.act,
+                                    norm=self.norm,
+                                    dropout=self.dropout,
+                                    bias=self.bias,
+                                    adn_ordering=self.adn_ordering,
+                                ),
+                                nn.AdaptiveAvgPool2d(output_size=(1, 1)),
+                                nn.Flatten(),
+                                nn.Linear(8*self.class_channels, self.class_channels),
+                                nn.SiLU(),
+                                nn.Linear(self.class_channels, self.classification[idx]),
+                                nn.Sigmoid()
+                            )
+                        )
 
     def _get_connection_block(self, down_path: nn.Module, up_path: nn.Module, subblock: nn.Module) -> nn.Module:
         """
@@ -192,13 +275,9 @@ class UNet(nn.Module):
             subblock: block defining the next layer in the network.
         Returns: block for this layer: `nn.Sequential(down_path, SkipConnection(subblock), up_path)`
         """
-        return nn.Sequential(
-                                down_path, 
-                                SkipConnection(subblock), 
-                                up_path
-                            )
+        return nn.Sequential(down_path, SkipConnection(subblock), up_path)
 
-    def _get_down_layer(self, in_channels: int, out_channels: int, strides: int, is_top: bool) -> nn.Module:
+    def _get_down_layer(self, in_channels: int, out_channels: int, strides: int, is_top: bool, data_collection: list=None) -> nn.Module:
         """
         Returns the encoding (down) part of a layer of the network. This typically will downsample data at some point
         in its structure. Its output is used as input to the next layer down and is concatenated with output from the
@@ -212,32 +291,38 @@ class UNet(nn.Module):
         """
         mod: nn.Module
         if self.num_res_units > 0:
-            mod = ResidualUnit(
-                self.dimensions,
-                in_channels,
-                out_channels,
-                strides=strides,
-                kernel_size=self.kernel_size,
-                subunits=self.num_res_units,
-                act=self.act,
-                norm=self.norm,
-                dropout=self.dropout,
-                bias=self.bias,
-                adn_ordering=self.adn_ordering,
+            mod = Wrap(
+                    layer=ResidualUnit(
+                    self.dimensions,
+                    in_channels,
+                    out_channels,
+                    strides=strides,
+                    kernel_size=self.kernel_size,
+                    subunits=self.num_res_units,
+                    act=self.act,
+                    norm=self.norm,
+                    dropout=self.dropout,
+                    bias=self.bias,
+                    adn_ordering=self.adn_ordering,
+                ),
+                data_collection=data_collection #self.output_encoder
             )
             return mod
-        mod = Convolution(
-            self.dimensions,
-            in_channels,
-            out_channels,
-            strides=strides,
-            kernel_size=self.kernel_size,
-            act=self.act,
-            norm=self.norm,
-            dropout=self.dropout,
-            bias=self.bias,
-            adn_ordering=self.adn_ordering,
-        )
+        mod = Wrap(
+                layer=Convolution(
+                    self.dimensions,
+                    in_channels,
+                    out_channels,
+                    strides=strides,
+                    kernel_size=self.kernel_size,
+                    act=self.act,
+                    norm=self.norm,
+                    dropout=self.dropout,
+                    bias=self.bias,
+                    adn_ordering=self.adn_ordering,
+                    ),
+                data_collection=data_collection
+            )
         return mod
 
     def _get_bottom_layer(self, in_channels: int, out_channels: int) -> nn.Module:
@@ -248,9 +333,9 @@ class UNet(nn.Module):
             in_channels: number of input channels.
             out_channels: number of output channels.
         """
-        return self._get_down_layer(in_channels, out_channels, 1, False)
+        return self._get_down_layer(in_channels, out_channels, 1, False, data_collection=self.output_decoder)
 
-    def _get_up_layer(self, in_channels: int, out_channels: int, strides: int, is_top: bool) -> nn.Module:
+    def _get_up_layer(self, in_channels: int, out_channels: int, strides: int, is_top: bool, data_collection: list=None) -> nn.Module:
         """
         Returns the decoding (up) part of a layer of the network. This typically will upsample data at some point
         in its structure. Its output is used as input to the next layer up.
@@ -279,27 +364,46 @@ class UNet(nn.Module):
         )
 
         if self.num_res_units > 0:
-            ru = ResidualUnit(
-                self.dimensions,
-                out_channels,
-                out_channels,
-                strides=1,
-                kernel_size=self.kernel_size,
-                subunits=1,
-                act=self.act,
-                norm=self.norm,
-                dropout=self.dropout,
-                bias=self.bias,
-                last_conv_only=is_top,
-                adn_ordering=self.adn_ordering,
+            ru = Wrap(
+                layer=ResidualUnit(
+                    self.dimensions,
+                    out_channels,
+                    out_channels,
+                    strides=1,
+                    kernel_size=self.kernel_size,
+                    subunits=1,
+                    act=self.act,
+                    norm=self.norm,
+                    dropout=self.dropout,
+                    bias=self.bias,
+                    last_conv_only=is_top,
+                    adn_ordering=self.adn_ordering,
+                    ),
+                data_collection=data_collection
             )
             conv = nn.Sequential(conv, ru)
 
+        
         return conv
+    
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, train=False) -> torch.Tensor:
+        self.output_encoder.clear()
+        self.output_decoder.clear()
         x = self.model(x)
-        return x
+
+        if not train:
+            return x[:,:1]
+        
+        ## training mode
+        if len(self.classification)>0:
+            # import pdb;pdb.set_trace()
+            classification = []
+            for idx in range(len(self.classification)):
+                classification.append(self.middle_class_mlp[idx](x))
+            return x[:,:1], classification
+        else:
+            return x[:,:1], self.output_encoder, self.output_decoder
 
 
 Unet = UNet

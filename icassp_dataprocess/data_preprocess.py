@@ -50,7 +50,44 @@ def get_Z_location(image_dir, csv_path='/raid/datasets/origin/origin_images_info
     
     return Z_location, remove_set
 
-def nii_gz_2_png(source_dir, sample_name, save_dir, type, valid_idx: list=None):
+def nii_gz_2_png_save_negative_slices(source_dir, sample_name, save_dir, type, valid_idx):
+    res = []
+    path = os.path.join(source_dir, sample_name)
+    original_img = nib.load(path)
+
+    original_np = original_img.get_fdata()
+    if type == 'image':
+        original_np = window_adjust(original_np)
+
+    # import pdb;pdb.set_trace()
+    positive_slices= set(valid_idx)
+
+    for index in range(original_np.shape[2]):
+        sliced_np = original_np[:, :, index:index+1]
+
+        # Normalize data to 0-255 for image saving
+        if index in positive_slices:
+            # print(f"max==min in {path}. skip!")
+            continue
+        else:
+            # norm_slice = (
+            #         (slice - slice.min()) / (slice.max() - slice.min()) * 255).astype(
+            #     np.uint8)
+
+            # # Save slice as PNG image
+            # norm_slice = Image.fromarray(norm_slice)
+            # norm_slice.save(os.path.join(save_dir, f'{sample_name}_{index}.png'))
+           
+            ## only get index according to mask
+            new_img = nib.Nifti1Image(sliced_np, affine=original_img.affine, header=original_img.header)
+            new_img.header['dim'][3] = sliced_np.shape[2]
+
+            nib.save(new_img, os.path.join(save_dir, f'{sample_name}_{index}.nii.gz'))
+            res.append(index)
+    
+    return res
+
+def nii_gz_2_png(source_dir, sample_name, save_dir, type, valid_idx: list=None, no_saving=False):
 
     res = []
     path = os.path.join(source_dir, sample_name)
@@ -79,11 +116,12 @@ def nii_gz_2_png(source_dir, sample_name, save_dir, type, valid_idx: list=None):
             # # Save slice as PNG image
             # norm_slice = Image.fromarray(norm_slice)
             # norm_slice.save(os.path.join(save_dir, f'{sample_name}_{index}.png'))
+            if not no_saving:
+                ## only get index according to mask
+                new_img = nib.Nifti1Image(sliced_np, affine=original_img.affine, header=original_img.header)
+                new_img.header['dim'][3] = sliced_np.shape[2]
 
-            new_img = nib.Nifti1Image(sliced_np, affine=original_img.affine, header=original_img.header)
-            new_img.header['dim'][3] = sliced_np.shape[2]
-
-            nib.save(new_img, os.path.join(save_dir, f'{sample_name}_{index}.nii.gz'))
+                nib.save(new_img, os.path.join(save_dir, f'{sample_name}_{index}.nii.gz'))
             res.append(index)
     
     return res
@@ -140,16 +178,16 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     # An example for loading nii.gz file
-    image_dir = "/raid/datasets/207file/images_A2"
-    mask_dir = None #"/raid/datasets/origin/Mask_A"
+    image_dir = "/raid/datasets/origin/images_A"
+    mask_dir = "/raid/datasets/origin/Mask_A"
     
     Z_location, remove_set = get_Z_location(image_dir)
 
     ## main functions
     if args.gen_2d:
         print("Generating 2d data. please wait...")
-        image_save_dir = '/raid/datasets/207file_generated_2d_slices/images_A'
-        mask_save_dir = None #'/raid/datasets/origin_generated_2d_slices/Mask_A'
+        image_save_dir = '/raid/datasets/origin_negative_2d_slices/images_A'
+        mask_save_dir = '/raid/datasets/origin_negative_2d_slices/Mask_A'
         if image_save_dir is not None:
             os.makedirs(image_save_dir, exist_ok=True)
         if mask_save_dir is not None:
@@ -158,9 +196,10 @@ if __name__ == '__main__':
         for sample_name in tqdm(os.listdir(image_dir)):
             # import pdb;pdb.set_trace()
             valid_index = None
-            if (mask_dir is not None) and (not sample_name not in remove_set):
-                valid_index = nii_gz_2_png(mask_dir, sample_name, mask_save_dir, 'mask')
-            nii_gz_2_png(image_dir, sample_name, image_save_dir, 'image', valid_idx=valid_index)
+            if (not sample_name not in remove_set):
+                if (mask_dir is not None):
+                    valid_index = nii_gz_2_png(mask_dir, sample_name, mask_save_dir, 'mask', no_saving=True)
+                nii_gz_2_png_save_negative_slices(image_dir, sample_name, image_save_dir, 'image', valid_idx=valid_index)
 
 
     if args.get_stat:
