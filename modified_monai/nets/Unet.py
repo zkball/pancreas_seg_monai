@@ -387,12 +387,12 @@ class UNet(nn.Module):
         return conv
     
 
-    def forward(self, x: torch.Tensor, train=False) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, test=False) -> torch.Tensor:
         self.output_encoder.clear()
         self.output_decoder.clear()
         x = self.model(x)
 
-        if not train:
+        if test:
             return x[:,:1]
         
         ## training mode
