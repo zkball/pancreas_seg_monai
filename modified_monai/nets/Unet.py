@@ -392,8 +392,8 @@ class UNet(nn.Module):
         self.output_decoder.clear()
         x = self.model(x)
 
-        if test:
-            return x[:,:1]
+        # if test:
+        #     return x[:,:1]
         
         ## training mode
         if len(self.classification)>0:

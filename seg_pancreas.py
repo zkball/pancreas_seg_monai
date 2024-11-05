@@ -183,14 +183,14 @@ class seg_pancreas_base():
         
         return negative_samples
     
-    def test_loop(self, epoch):
+    def test_loop(self, epoch="infer"):
         for idx_test, test_data in enumerate(self.test_loader):
             # import pdb;pdb.set_trace()
             test_images = test_data.to(self.device)
 
-            test_images = self.preprocessing(inputs=[test_images])
+            test_images = self.preprocessing(test_images)
 
-            test_outputs = self.inference_for_validation(test_images)
+            test_outputs = self.inference_for_testing(test_images)
 
             if idist.get_local_rank() == 0:
                 self.plot_results(idx_test, epoch, inputs=test_images, outputs=test_outputs)
@@ -206,7 +206,7 @@ class seg_pancreas_base():
             for idx_val, val_data in enumerate(self.val_loader):
                 val_images, val_labels = val_data[0].to(self.device), val_data[1].to(self.device)
 
-                val_images, val_labels = self.preprocessing_with_labels(inputs=[val_images, val_labels])
+                val_images, val_labels, _ = self.preprocessing_with_labels(val_images, val_labels)
 
                 val_outputs = self.inference_for_validation(val_images, val_labels)
 
@@ -234,7 +234,7 @@ class seg_pancreas_base():
 
             ######### test - if have 
             if self.best_metric>0.5 and metric == self.best_metric:
-                self.test_loop()
+                self.test_loop(epoch=epoch)
         
         return metric
 

@@ -284,7 +284,7 @@ class seg_pancreas_2d(seg_pancreas_base):
         return loss
     
     def inference_for_validation(self, inputs, labels, **aux_inputs):
-        val_outputs = self.model(inputs) #sliding_window_inference(val_images, roi_size, sw_batch_size, model)
+        val_outputs, _ = self.model(inputs) #sliding_window_inference(val_images, roi_size, sw_batch_size, model)
         # import pdb;pdb.set_trace()
         val_outputs_digit = [i for i in decollate_batch(val_outputs)]
         val_outputs = [self.post_trans(i) for i in val_outputs_digit]
@@ -294,7 +294,7 @@ class seg_pancreas_2d(seg_pancreas_base):
         return val_outputs
     
     def inference_for_testing(self, inputs, **aux_inputs):
-        val_outputs = self.model(inputs) #sliding_window_inference(val_images, roi_size, sw_batch_size, model)
+        val_outputs, _ = self.model(inputs, test=True) #sliding_window_inference(val_images, roi_size, sw_batch_size, model)
         # import pdb;pdb.set_trace()
         val_outputs_digit = [i for i in decollate_batch(val_outputs)]
         val_outputs = [self.post_trans(i) for i in val_outputs_digit]
@@ -320,10 +320,11 @@ class seg_pancreas_2d(seg_pancreas_base):
     def plot_results(self, idx, epoch, inputs, outputs, **kwargs):
         name = os.path.join(os.getcwd(), "runs", f"{self.args.mode}_output", f"{epoch}_{idx}_{self.args.mode}_{self.args.model}_{self.args.signature}_.png")
         if idx % 100 == 0:
+            # import pdb;pdb.set_trace()
             images = stitch_images(
                 postprocess(inputs),
                 *[postprocess(v) for k,v in kwargs.items()],
-                postprocess(outputs),
+                postprocess(outputs[0][None]),
                 img_per_row=1
             )
             print('\nsaving sample: ' + name)
