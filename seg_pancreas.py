@@ -135,7 +135,7 @@ class seg_pancreas_base():
 
         self.seg_loss = self.prepare_losses()     
         self.class_loss = self.bce_loss 
-        self.optimizer = torch.optim.Adam(self.model.parameters(), )
+        self.optimizer = torch.optim.Adam(self.model.parameters(), self.learning_rate)
 
 
     def window_adjust(self, inputs: list, w_width=250, w_min=-75, w_max=175):
@@ -151,18 +151,33 @@ class seg_pancreas_base():
             inputs[idx] = inputs[idx][..., 0]
         return tuple(inputs)
     
+    """
+        Output: inputs 
+    """
     def preprocessing(self, inputs, **aux_inputs):
         raise NotImplementedError("please implement preprocessing")
     
+    """
+        Output: inputs, labels [, others]
+    """
     def preprocessing_with_labels(self, inputs, labels, **aux_inputs):
         raise NotImplementedError("please implement preprocessing")
     
+    """
+        Output: loss, outputs, info
+    """
     def inference_for_training(self, inputs, labels, **aux_inputs):
         raise NotImplementedError("please implement inference_for_training")
     
+    """
+        Output: val_outputs (dice_metric automatically consumes metric)
+    """
     def inference_for_validation(self, inputs, labels, **aux_inputs):
         raise NotImplementedError("please implement inference_for_validation")
     
+    """
+        Output: test_outputs 
+    """
     def inference_for_testing(self, inputs, **aux_inputs):
         raise NotImplementedError("please implement inference_for_testing")
     
@@ -193,7 +208,7 @@ class seg_pancreas_base():
             test_outputs = self.inference_for_testing(test_images)
 
             if idist.get_local_rank() == 0:
-                self.plot_results(idx_test, epoch, inputs=test_images, outputs=test_outputs)
+                self.plot_results(idx_test, epoch, inputs=test_images, outputs=test_outputs, suffix="_test")
             idist.barrier()
 
     def eval_loop(self, epoch=None):
@@ -222,7 +237,7 @@ class seg_pancreas_base():
             if metric > self.best_metric:
                 self.best_metric = metric
                 self.best_metric_epoch = epoch + 1
-                torch.save(self.model.state_dict(), f"best_{mode}_{self.args.model}_{self.args.signature}_{self.best_metric}_{self.best_metric_epoch}.pth")
+                torch.save(self.model.state_dict(), f"best_{self.args.mode}_{self.args.model}_{self.args.signature}_{self.best_metric}_{self.best_metric_epoch}.pth")
                 print("saved new best metric model")
             print(
                 "current epoch: {} current mean dice: {:.4f} best mean dice: {:.4f} at epoch {}".format(
@@ -262,7 +277,7 @@ class seg_pancreas_base():
 
                     self.optimizer.zero_grad()
                     
-                    loss, outputs, info = self.inference_for_training(inputs, labels, **aux_inputs)
+                    loss, outputs, info = self.inference_for_training(inputs, labels, **(aux_inputs or {}))
                     
                     loss.backward()
                     ###  gradient_clipping
@@ -279,7 +294,7 @@ class seg_pancreas_base():
 
             ###### inference code
             if self.args.eval or (not self.args.eval and (epoch + 1) % self.val_interval == 0):
-                metric = self.eval_loop()
+                metric = self.eval_loop(epoch=epoch) ## contain test_loop inside (when eval metric > thresh)
                 metric_values.append(metric)
 
 

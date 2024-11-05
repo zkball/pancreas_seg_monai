@@ -80,6 +80,7 @@ class seg_pancreas_2d(seg_pancreas_base):
         """
         self.batch_size = 4
         self.class_labels = None
+        self.learning_rate = 1e-3
 
         self.num_epoch  = 100
         self.num_epoch = self.num_epoch if self.args.eval is False else 1
@@ -98,34 +99,6 @@ class seg_pancreas_2d(seg_pancreas_base):
         prepare dataset and model
         """
         self.prepare_everything()
-    
-
-    def preprocessing(self, inputs, **aux_inputs):
-        (inputs,) = self.window_adjust(inputs=[inputs])
-        (inputs,) = self.nii_to_2d(inputs=[inputs])
-
-        return inputs
-
-
-    def preprocessing_with_labels(self, inputs, labels, **aux_inputs):
-        other_inputs = {}
-        if 'with_neg' in aux_inputs.keys():
-            negative_samples = self.next_negative_sample()
-            aggregate_batch_size = self.batch_size+negative_samples.shape[0]
-            if self.class_labels is None or self.class_labels.shape[0]!=aggregate_batch_size:
-                self.class_labels = torch.tensor([1.]*self.batch_size+[0.]*negative_samples.shape[0])[..., None].to(self.device)
-
-            other_inputs["negative_samples"] = negative_samples
-
-        (inputs,) = self.window_adjust(inputs=[inputs])
-        inputs, labels = self.nii_to_2d(inputs=[inputs, labels])
-
-        for k, v in other_inputs.items():
-            (v,) = self.window_adjust(inputs=[v])
-            (v,) = self.nii_to_2d(inputs=[v])
-            other_inputs[k] = v
-
-        return inputs, labels, other_inputs
 
 
     def prepare_data(self):
@@ -283,6 +256,7 @@ class seg_pancreas_2d(seg_pancreas_base):
 
         return loss
     
+    
     def inference_for_validation(self, inputs, labels, **aux_inputs):
         val_outputs, _ = self.model(inputs) #sliding_window_inference(val_images, roi_size, sw_batch_size, model)
         # import pdb;pdb.set_trace()
@@ -317,8 +291,37 @@ class seg_pancreas_2d(seg_pancreas_base):
 
         return loss, outputs, info
     
-    def plot_results(self, idx, epoch, inputs, outputs, **kwargs):
-        name = os.path.join(os.getcwd(), "runs", f"{self.args.mode}_output", f"{epoch}_{idx}_{self.args.mode}_{self.args.model}_{self.args.signature}_.png")
+
+    def preprocessing(self, inputs, **aux_inputs):
+        (inputs,) = self.window_adjust(inputs=[inputs])
+        (inputs,) = self.nii_to_2d(inputs=[inputs])
+
+        return inputs
+
+
+    def preprocessing_with_labels(self, inputs, labels, **aux_inputs):
+        other_inputs = {}
+        if 'with_neg' in aux_inputs.keys():
+            negative_samples = self.next_negative_sample()
+            aggregate_batch_size = self.batch_size+negative_samples.shape[0]
+            if self.class_labels is None or self.class_labels.shape[0]!=aggregate_batch_size:
+                self.class_labels = torch.tensor([1.]*self.batch_size+[0.]*negative_samples.shape[0])[..., None].to(self.device)
+
+            other_inputs["negative_samples"] = negative_samples
+
+        (inputs,) = self.window_adjust(inputs=[inputs])
+        inputs, labels = self.nii_to_2d(inputs=[inputs, labels])
+
+        for k, v in other_inputs.items():
+            (v,) = self.window_adjust(inputs=[v])
+            (v,) = self.nii_to_2d(inputs=[v])
+            other_inputs[k] = v
+
+        return inputs, labels, other_inputs
+
+    
+    def plot_results(self, idx, epoch, inputs, outputs, suffix="", **kwargs):
+        name = os.path.join(os.getcwd(), "runs", f"{self.args.mode}{suffix}_output", f"{epoch}_{idx}_{self.args.mode}_{self.args.model}_{self.args.signature}_.png")
         if idx % 100 == 0:
             # import pdb;pdb.set_trace()
             images = stitch_images(
